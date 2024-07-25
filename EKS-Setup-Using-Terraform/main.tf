@@ -1,3 +1,5 @@
+# AUTHOR: Pramod Badiger
+
 resource "aws_vpc" "EKS_VPC" {
     cidr_block           = var.vpc_cidr
     instance_tenancy     = "default"
