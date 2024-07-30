@@ -1,0 +1,89 @@
+stages:
+  - install_tools
+  - test
+  - security
+  - docker
+  - deploy
+
+variables:
+  MANIFEST_ACTION: "apply"  # Default action can be apply or delete
+
+install_trivy_docker_job:
+  stage: install_tools
+  script:
+    - sudo apt update && sudo apt-get update
+    - sudo apt install unzip
+    - sudo apt-get install wget apt-transport-https gnupg lsb-release unzip -y
+    - wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+    - echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+    - sudo apt-get update
+    - sudo apt-get install trivy -y
+    - sudo apt install docker.io -y && sudo chmod 666 /var/run/docker.sock
+    - sudo snap install kubectl --classic
+    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    - unzip awscliv2.zip
+    - sudo ./aws/install --update
+  tags:
+    - self-hosted
+
+trivy-scan:
+  stage: security
+  script:
+    - trivy fs --format table -o trivy-fs-report.html .
+  tags:
+    - self-hosted
+
+sonarqube-check:
+  stage: security
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - sonar-scanner
+  allow_failure: true
+  only:
+    - main
+
+docker-build-push:
+  stage: docker
+  script:
+    - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+    - docker build -t $DOCKER_USERNAME/gitlab-flaskapp:latest .
+    - docker push $DOCKER_USERNAME/gitlab-flaskapp:latest
+  tags:
+    - self-hosted
+  only:
+    - main
+
+k8s-deploy:
+  stage: deploy
+  variables:
+    KUBECONFIG_PATH: /home/ubuntu/.kube/config
+  before_script:
+    - mkdir -p "$(dirname "$KUBECONFIG_PATH")"
+    - echo "$KUBECONFIG_CONTENT" | base64 -d > "$KUBECONFIG_PATH"
+    - export KUBECONFIG="$KUBECONFIG_PATH"
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region $AWS_REGION
+  script:
+    - aws sts get-caller-identity # Verify AWS credentials
+    - |
+      if [ "$MANIFEST_ACTION" == "apply" ]; then
+        kubectl apply -f self-k8s-ds.yml
+      elif [ "$MANIFEST_ACTION" == "delete" ]; then
+        kubectl delete -f self-k8s-ds.yml
+      else
+        echo "Invalid MANIFEST_ACTION: $MANIFEST_ACTION. Must be 'apply' or 'delete'."
+        exit 1
+      fi
+  tags:
+    - self-hosted
+  only:
+    - main
